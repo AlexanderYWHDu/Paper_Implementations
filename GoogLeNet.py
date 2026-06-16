@@ -51,6 +51,24 @@ class InceptionA(nn.Module):
         return torch.cat([branch1x1, branch5x5, branch3x3, branch_pool], dim=1)
 
 
+class AuxClassifier(nn.Module):
+    def __init__(self, in_channels, num_classes=10):
+        super(AuxClassifier, self).__init__()
+        self.pool = nn.AdaptiveAvgPool2d((3, 3))
+        self.conv = nn.Conv2d(in_channels, 32, kernel_size=1)
+        self.fc1 = nn.Linear(32 * 3 * 3, 128)
+        self.fc2 = nn.Linear(128, num_classes)
+        self.dropout = nn.Dropout(p=0.7)
+
+    def forward(self, x):
+        x = self.pool(x)
+        x = F.relu(self.conv(x))
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        return self.fc2(x)
+
+
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
@@ -58,6 +76,7 @@ class Net(nn.Module):
         self.conv2 = nn.Conv2d(88, 20, kernel_size=5)  # 88 = output channels of InceptionA
         self.incep1 = InceptionA(in_channels=10)
         self.incep2 = InceptionA(in_channels=20)
+        self.aux = AuxClassifier(in_channels=88)  # attached after incep1
         self.mp = nn.MaxPool2d(2)
         self.fc = nn.Linear(1408, 10)  # 88 * 4 * 4 = 1408
 
@@ -65,10 +84,16 @@ class Net(nn.Module):
         in_size = x.size(0)
         x = F.relu(self.mp(self.conv1(x)))
         x = self.incep1(x)
+
+        aux_out = self.aux(x) if self.training else None
+
         x = F.relu(self.mp(self.conv2(x)))
         x = self.incep2(x)
         x = x.view(in_size, -1)
         x = self.fc(x)
+
+        if self.training:
+            return x, aux_out
         return x
 
 
@@ -78,13 +103,14 @@ optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
 
 
 def train(epoch):
+    model.train()
     running_loss = 0.0
     for batch_idx, data in enumerate(train_loader, 0):
         inputs, target = data
         inputs, target = inputs.to(device), target.to(device)
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, target)
+        main_out, aux_out = model(inputs)
+        loss = criterion(main_out, target) + 0.3 * criterion(aux_out, target)
         loss.backward()
         optimizer.step()
         running_loss += loss.item()
@@ -94,6 +120,7 @@ def train(epoch):
 
 
 def test():
+    model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
